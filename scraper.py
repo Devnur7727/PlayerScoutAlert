@@ -2,16 +2,17 @@ import os
 import requests
 from bs4 import BeautifulSoup
 
-def get_latest_player():
+def get_players_on_page():
     url = "https://pesdb.net/efootball/?all=1&sort=time_added"
     try:
         response = requests.get(url, timeout=10)
         response.raise_for_status()
     except requests.RequestException as e:
         print(f"Error fetching pesdb: {e}")
-        return None
+        return []
         
     soup = BeautifulSoup(response.text, 'html.parser')
+    players = []
     
     for a_tag in soup.find_all('a'):
         href = a_tag.get('href', '')
@@ -20,11 +21,11 @@ def get_latest_player():
                 player_id = href.split('?id=')[1].split('&')[0]
                 player_name = a_tag.text.strip()
                 if player_name and player_id.isdigit():
-                    return {'id': player_id, 'name': player_name}
+                    players.append({'id': player_id, 'name': player_name})
             except IndexError:
                 continue
     
-    return None
+    return players
 
 def send_telegram_message(token, chat_id, message):
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -32,7 +33,7 @@ def send_telegram_message(token, chat_id, message):
         "chat_id": chat_id,
         "text": message,
         "parse_mode": "HTML",
-        "disable_web_page_preview": False
+        "disable_web_page_preview": True
     }
     try:
         response = requests.post(url, json=payload, timeout=10)
@@ -44,12 +45,10 @@ def send_telegram_message(token, chat_id, message):
         print(f"Error sending telegram message: {e}")
 
 def main():
-    latest_player = get_latest_player()
-    if not latest_player:
-        print("Failed to get the latest player.")
+    players_on_page = get_players_on_page()
+    if not players_on_page:
+        print("Failed to get players from the page.")
         return
-
-    player_identifier = f"{latest_player['id']}:{latest_player['name']}"
     
     last_player_file = 'last_player.txt'
     last_player = ""
@@ -57,29 +56,44 @@ def main():
         with open(last_player_file, 'r', encoding='utf-8') as f:
             last_player = f.read().strip()
             
-    print(f"Latest player on site: {player_identifier}")
-    print(f"Last recorded player : {last_player}")
-            
-    if player_identifier != last_player:
-        print("New player detected! Sending Telegram message...")
-        token = os.environ.get('TELEGRAM_BOT_TOKEN')
-        chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    print(f"Last recorded player: {last_player}")
+    
+    new_players = []
+    for player in players_on_page:
+        player_identifier = f"{player['id']}:{player['name']}"
+        if player_identifier == last_player:
+            # We reached the player we already know about
+            break
+        new_players.append(player)
         
-        if token and chat_id:
-            message = f"🚨 <b>New Player Added!</b>\n\nName: <b>{latest_player['name']}</b>\nLink: https://pesdb.net/efootball/?id={latest_player['id']}"
-            send_telegram_message(token, chat_id, message)
-            
-            with open(last_player_file, 'w', encoding='utf-8') as f:
-                f.write(player_identifier)
-            print("Successfully updated last_player.txt")
-        else:
-            print("Telegram secrets not found. Cannot send message.")
-            # We still update the file locally so it works without secrets (e.g. testing)
-            with open(last_player_file, 'w', encoding='utf-8') as f:
-                f.write(player_identifier)
-            print("Successfully updated last_player.txt (without sending message)")
-    else:
+    if not new_players:
         print("No new players added.")
+        return
+        
+    print(f"Found {len(new_players)} new player(s)!")
+    
+    token = os.environ.get('TELEGRAM_BOT_TOKEN')
+    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
+    
+    if token and chat_id:
+        message = f"🚨 <b>{len(new_players)} New Player(s) Added!</b>\n\n"
+        for i, p in enumerate(new_players):
+            if i >= 30: # Limit to 30 to avoid Telegram message length limits
+                message += f"\n<i>...and {len(new_players) - 30} more!</i>"
+                break
+            message += f"• <b>{p['name']}</b> - <a href='https://pesdb.net/efootball/?id={p['id']}'>View</a>\n"
+            
+        send_telegram_message(token, chat_id, message)
+    else:
+        print("Telegram secrets not found. Cannot send message.")
+
+    # Update last_player.txt with the newest player (the first one in the list)
+    newest_player = new_players[0]
+    newest_identifier = f"{newest_player['id']}:{newest_player['name']}"
+    
+    with open(last_player_file, 'w', encoding='utf-8') as f:
+        f.write(newest_identifier)
+    print("Successfully updated last_player.txt")
 
 if __name__ == "__main__":
     main()
